@@ -7,7 +7,7 @@ import sqlite3
 
 # --- Hardcoded secrets (should be flagged) ---
 AWS_ACCESS_KEY = "AKIA1234567890ABCDEF"
-STRIPE_SECRET = "sk_live_51H8xxxxxxxxxxxxxxxxxxxxx"
+STRIPE_SECRET = "sk_live_FAKE00000000000000DEMOKEY"
 DATABASE_PASSWORD = "admin123"
 
 conn = sqlite3.connect("bank.db")
