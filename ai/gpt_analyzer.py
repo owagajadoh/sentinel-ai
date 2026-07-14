@@ -19,8 +19,9 @@ import json
 
 def build_prompt(finding):
     """
-    This is the prompt you'd actually send to GPT-5.6 in the Codex build.
-    Kept here now so the swap-in later is a copy-paste, not a redesign.
+    Single-finding prompt — kept for reference/testing individual findings,
+    but the real Codex integration should use build_batch_prompt() below
+    instead: one API call for the whole scan, not one per finding.
     """
     return f"""You are a senior AppSec engineer reviewing a security finding.
 
@@ -41,6 +42,47 @@ Respond with a JSON object with these exact keys:
   account takeover, service outage, compliance violation)
 - secure_patch: a short code snippet showing the fixed version
 - lesson: 1 sentence, the general principle a developer should remember
+"""
+
+
+def build_batch_prompt(findings):
+    """
+    THIS is the prompt the real GPT-5.6 integration should use: one request
+    for the entire scan's findings, not one call per finding. Cheaper,
+    faster, and keeps tone/style consistent across the report.
+
+    Each finding is tagged with its index so the model's response can be
+    mapped back to the right finding without relying on ordering alone.
+    """
+    findings_block = "\n\n".join(
+        f"Finding [{i}]:\n"
+        f"- Category: {f['category']}\n"
+        f"- Severity: {f['severity']}\n"
+        f"- File: {f['file']}\n"
+        f"- Line: {f['line']}\n"
+        f"- Code: {f['code_snippet']}"
+        for i, f in enumerate(findings)
+    )
+
+    return f"""You are a senior AppSec engineer reviewing a batch of security
+findings from an automated scan. For EACH finding below, produce the same
+analysis a senior engineer would give in a code review.
+
+{findings_block}
+
+Respond with a JSON object whose keys are the finding indices as strings
+(e.g. "0", "1", "2", ...) and whose values are objects with these exact keys:
+- why_it_matters: 1-2 sentences, plain language, no jargon
+- attacker_reasoning: 2-3 sentences, first person, how an attacker would
+  exploit this specific line
+- defender_reasoning: 2-3 sentences, first person, how you'd fix it and why
+  that fix works
+- business_impact: 1 sentence naming a concrete consequence
+- secure_patch: a short code snippet showing the fixed version
+- lesson: 1 sentence, the general principle a developer should remember
+
+Keep each finding's analysis grounded in ITS OWN code snippet — do not let
+findings bleed into each other's explanations.
 """
 
 
@@ -99,23 +141,83 @@ def _fake_patch(finding):
     return "# Manual review recommended for this pattern."
 
 
+def _mock_batch_call(findings):
+    """
+    Simulates the response shape a real batched GPT-5.6 call would return:
+    ONE JSON object keyed by finding index, built in a single pass.
+
+    This exists so analyze_all() below already has the final call shape —
+    one request in, one JSON-by-index response out — even though the body
+    here is still templates. Swapping in real_gpt_batch_call() (below)
+    is then a one-line change in analyze_all(), nothing else moves.
+    """
+    response = {}
+    for i, finding in enumerate(findings):
+        template = _TEMPLATES.get(finding["category"], _TEMPLATES["_default"])
+        analysis = dict(template)
+        analysis["secure_patch"] = _fake_patch(finding)
+        response[str(i)] = analysis
+    return response
+
+
+def real_gpt_batch_call(findings, api_key=None):
+    """
+    --- THIS IS THE FUNCTION TO IMPLEMENT IN CODEX ---
+    Swap the call in analyze_all() from _mock_batch_call(findings) to this
+    function. Same input (list of finding dicts), same output (dict keyed
+    by finding index as a string), so nothing downstream needs to change.
+
+    Reference implementation using the OpenAI SDK:
+
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+
+        response = client.chat.completions.create(
+            model="gpt-5.6",
+            messages=[{"role": "user", "content": build_batch_prompt(findings)}],
+            response_format={"type": "json_object"},
+        )
+        return json.loads(response.choices[0].message.content)
+
+    Wrap the API call in try/except and fall back to _mock_batch_call()
+    on failure so a flaky API call never breaks the demo mid-scan.
+    """
+    raise NotImplementedError(
+        "Wire up the real GPT-5.6 call here (see docstring). "
+        "Until then, analyze_all() uses _mock_batch_call()."
+    )
+
+
 def analyze_finding(finding):
-    """
-    finding: dict matching scanner.base.Finding.to_dict()
-    returns: dict with why_it_matters / attacker_reasoning / defender_reasoning /
-             business_impact / secure_patch / lesson
-    """
+    """Kept for ad-hoc single-finding testing/debugging. analyze_all()
+    below does NOT use this — it goes through the batch path."""
     template = _TEMPLATES.get(finding["category"], _TEMPLATES["_default"])
-    result = dict(template)  # copy so we don't mutate the shared template
+    result = dict(template)
     result["secure_patch"] = _fake_patch(finding)
     return result
 
 
 def analyze_all(findings):
-    """findings: list of dicts (from findings.json['findings'])"""
+    """
+    findings: list of dicts (from findings.json['findings'])
+    returns: same list, each with an "analysis" key attached.
+
+    Routes through ONE batch call (see _mock_batch_call), matching each
+    finding back to its analysis by index — this is the real integration
+    shape. To go live: change _mock_batch_call(findings) below to
+    real_gpt_batch_call(findings, api_key=...).
+    """
+    if not findings:
+        return []
+
+    batch_response = _mock_batch_call(findings)
+
     enriched = []
-    for finding in findings:
-        analysis = analyze_finding(finding)
+    for i, finding in enumerate(findings):
+        analysis = batch_response.get(str(i))
+        if analysis is None:
+            # Defensive fallback if the model ever skips an index
+            analysis = analyze_finding(finding)
         enriched.append({**finding, "analysis": analysis})
     return enriched
 
